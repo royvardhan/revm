@@ -146,7 +146,8 @@ pub fn erc20_gas_handler_register<'a, EvmWiringT: EvmWiring, SPEC: Spec>(
     handler.post_execution.reward_beneficiary = Arc::new(|ctx, gas| {
         let beneficiary = *ctx.evm.env.block.coinbase();
         let gas_price = ctx.evm.env.effective_gas_price();
-        let reward = gas_price * U256::from(gas.spent() - gas.refunded() as u64);
+        let base_fee = ctx.evm.env.block.basefee();
+        let reward = (gas_price - base_fee) * U256::from(gas.spent() - gas.refunded() as u64);
 
         let token_account = ctx
             .evm

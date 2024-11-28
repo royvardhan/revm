@@ -46,14 +46,13 @@ pub fn erc20_gas_handler_register<'a, EvmWiringT: EvmWiring, SPEC: Spec>(
     handler.pre_execution.deduct_caller = Arc::new(|ctx| {
         let caller = ctx.evm.inner.env.tx.common_fields().caller();
         let gas_limit = ctx.evm.inner.env.tx.common_fields().gas_limit();
-        let max_fee = ctx.evm.inner.env.tx.max_fee();
+        let mut token_amount = U256::from(gas_limit).saturating_mul(ctx.evm.env.effective_gas_price());
 
-        // Checked multiplication
-        let token_amount = U256::from(gas_limit)
-            .checked_mul(U256::from(max_fee))
-            .ok_or(EVMError::Transaction(
-            InvalidTransaction::OverflowPaymentInTransaction.into()
-        ))?;
+
+        // EIP-4844
+        if let Some(data_fee) = ctx.evm.env.calc_data_fee() {
+            token_amount = token_amount.saturating_add(data_fee);
+        }
 
         let balance_slot: U256 = keccak256((caller, U256::from(3)).abi_encode()).into();
 

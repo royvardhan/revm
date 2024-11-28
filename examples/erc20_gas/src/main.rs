@@ -161,47 +161,55 @@ pub fn erc20_gas_handler_register<'a, EvmWiringT: EvmWiring, SPEC: Spec>(
         let beneficiary = *ctx.evm.env.block.coinbase();
         let gas_price = ctx.evm.env.effective_gas_price();
         let base_fee = ctx.evm.env.block.basefee();
-        let reward = (gas_price - base_fee)
+        
+        // Calculate priority fee (tip to beneficiary)
+        let priority_fee = (gas_price - base_fee)
             .checked_mul(U256::from(gas.spent() - gas.refunded() as u64))
             .ok_or(EVMError::Transaction(
                 InvalidTransaction::OverflowPaymentInTransaction.into()
             ))?;
 
-        let token_account = ctx
-            .evm
-            .inner
-            .journaled_state
-            .load_account(TOKEN, &mut ctx.evm.inner.db)
-            .map_err(EVMError::Database)?;
+        // Only process transfers if priority_fee > 0
+        if !priority_fee.is_zero() {
+            let token_account = ctx
+                .evm
+                .inner
+                .journaled_state
+                .load_account(TOKEN, &mut ctx.evm.inner.db)
+                .map_err(EVMError::Database)?;
 
-        // Transfer reward from treasury to beneficiary
-        let treasury_balance_slot: U256 = keccak256((TREASURY, U256::from(3)).abi_encode()).into();
-        let treasury_balance = token_account
-            .storage
-            .get(&treasury_balance_slot)
-            .expect("Treasury balance slot not found")
-            .present_value();
+            // Transfer priority fee from treasury to beneficiary
+            let treasury_balance_slot: U256 = keccak256((TREASURY, U256::from(3)).abi_encode()).into();
+            let treasury_balance = token_account
+                .storage
+                .get(&treasury_balance_slot)
+                .expect("Treasury balance slot not found")
+                .present_value();
 
-        token_account.data.storage.insert(
-            treasury_balance_slot,
-            EvmStorageSlot::new_changed(treasury_balance, treasury_balance.saturating_sub(reward)),
-        );
+            token_account.data.storage.insert(
+                treasury_balance_slot,
+                EvmStorageSlot::new_changed(
+                    treasury_balance,
+                    treasury_balance.saturating_sub(priority_fee)
+                ),
+            );
 
-        let beneficiary_balance_slot: U256 =
-            keccak256((beneficiary, U256::from(3)).abi_encode()).into();
-        let beneficiary_balance = token_account
-            .storage
-            .get(&beneficiary_balance_slot)
-            .expect("Beneficiary balance slot not found")
-            .present_value();
+            let beneficiary_balance_slot: U256 =
+                keccak256((beneficiary, U256::from(3)).abi_encode()).into();
+            let beneficiary_balance = token_account
+                .storage
+                .get(&beneficiary_balance_slot)
+                .expect("Beneficiary balance slot not found")
+                .present_value();
 
-        token_account.data.storage.insert(
-            beneficiary_balance_slot,
-            EvmStorageSlot::new_changed(
-                beneficiary_balance,
-                beneficiary_balance.saturating_add(reward),
-            ),
-        );
+            token_account.data.storage.insert(
+                beneficiary_balance_slot,
+                EvmStorageSlot::new_changed(
+                    beneficiary_balance,
+                    beneficiary_balance.saturating_add(priority_fee)
+                ),
+            );
+        }
 
         Ok(())
     });

@@ -6,7 +6,6 @@ use database::{AlloyDB, BlockId, CacheDB};
 use reqwest::Client;
 use revm::{
     database_interface::WrapDatabaseAsync,
-    handler::mainnet::validate_tx_against_account,
     primitives::{address, keccak256, Address, Bytes, TxKind, U256},
     specification::hardfork::{LatestSpec, Spec},
     state::{AccountInfo, EvmStorageSlot},
@@ -16,7 +15,7 @@ use revm::{
     },
     Database, Evm, EvmHandler, EvmWiring,
 };
-use std::sync::Arc;
+use std::{cmp::Ordering, sync::Arc};
 
 type AlloyCacheDB =
     CacheDB<WrapDatabaseAsync<AlloyDB<Http<Client>, Ethereum, RootProvider<Http<Client>>>>>;
@@ -47,8 +46,14 @@ pub fn erc20_gas_handler_register<'a, EvmWiringT: EvmWiring, SPEC: Spec>(
     handler.pre_execution.deduct_caller = Arc::new(|ctx| {
         let caller = ctx.evm.inner.env.tx.common_fields().caller();
         let gas_limit = ctx.evm.inner.env.tx.common_fields().gas_limit();
-        let gas_price = ctx.evm.inner.env.effective_gas_price();
-        let token_amount = U256::from(gas_limit) * gas_price;
+        let max_fee = ctx.evm.inner.env.tx.max_fee();
+
+        // Checked multiplication
+        let token_amount = U256::from(gas_limit)
+            .checked_mul(U256::from(max_fee))
+            .ok_or(EVMError::Transaction(
+            InvalidTransaction::OverflowPaymentInTransaction.into()
+        ))?;
 
         let balance_slot: U256 = keccak256((caller, U256::from(3)).abi_encode()).into();
 
@@ -66,7 +71,12 @@ pub fn erc20_gas_handler_register<'a, EvmWiringT: EvmWiring, SPEC: Spec>(
             .present_value();
 
         if storage_value < token_amount {
-            panic!("Insufficient balance");
+            return Err(EVMError::Transaction(
+                InvalidTransaction::LackOfFundForMaxFee {
+                    fee: Box::new(token_amount),
+                    balance: Box::new(storage_value),
+                }.into()
+            ));
         }
 
         token_account.data.storage.insert(
@@ -96,7 +106,12 @@ pub fn erc20_gas_handler_register<'a, EvmWiringT: EvmWiring, SPEC: Spec>(
     handler.post_execution.reimburse_caller = Arc::new(|ctx, gas| {
         let caller = ctx.evm.inner.env.tx.common_fields().caller();
         let gas_price = ctx.evm.inner.env.effective_gas_price();
-        let refund_amount = gas_price * U256::from(gas.remaining() + gas.refunded() as u64);
+        let refund_gas = gas.remaining().saturating_add(gas.refunded() as u64);
+        let refund_amount = gas_price
+            .checked_mul(U256::from(refund_gas))
+            .ok_or(EVMError::Transaction(
+                InvalidTransaction::OverflowPaymentInTransaction.into()
+            ))?;    
 
         if refund_amount.is_zero() {
             return Ok(());
@@ -147,7 +162,11 @@ pub fn erc20_gas_handler_register<'a, EvmWiringT: EvmWiring, SPEC: Spec>(
         let beneficiary = *ctx.evm.env.block.coinbase();
         let gas_price = ctx.evm.env.effective_gas_price();
         let base_fee = ctx.evm.env.block.basefee();
-        let reward = (gas_price - base_fee) * U256::from(gas.spent() - gas.refunded() as u64);
+        let reward = (gas_price - base_fee)
+            .checked_mul(U256::from(gas.spent() - gas.refunded() as u64))
+            .ok_or(EVMError::Transaction(
+                InvalidTransaction::OverflowPaymentInTransaction.into()
+            ))?;
 
         let token_account = ctx
             .evm
@@ -189,6 +208,53 @@ pub fn erc20_gas_handler_register<'a, EvmWiringT: EvmWiring, SPEC: Spec>(
     });
 
     handler.validation.tx_against_state = Arc::new(|ctx| {
+        let caller = ctx.evm.inner.env.tx.common_fields().caller();
+        
+        // Load caller account for nonce check
+        let caller_account = ctx
+            .evm
+            .inner
+            .journaled_state
+            .load_account(caller, &mut ctx.evm.inner.db)
+            .map_err(EVMError::Database)?;
+
+        // Nonce validation
+        if !ctx.evm.inner.env.cfg.is_nonce_check_disabled() {
+            let tx_nonce = ctx.evm.inner.env.tx.common_fields().nonce();
+            let state_nonce = caller_account.info.nonce;
+            match tx_nonce.cmp(&state_nonce) {
+                Ordering::Greater => {
+                    return Err(EVMError::Transaction(
+                        InvalidTransaction::NonceTooHigh { 
+                            tx: tx_nonce, 
+                            state: state_nonce 
+                        }.into()
+                    ));
+                }
+                Ordering::Less => {
+                    return Err(EVMError::Transaction(
+                        InvalidTransaction::NonceTooLow { 
+                            tx: tx_nonce, 
+                            state: state_nonce 
+                        }.into()
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        // Calculate total required tokens (gas + value)
+        let tx = &ctx.evm.inner.env.tx;
+        let total_required = U256::from(tx.common_fields().gas_limit())
+            .checked_mul(U256::from(tx.max_fee()))
+            .and_then(|gas_cost| gas_cost.checked_add(tx.common_fields().value()))
+            .ok_or_else(|| EVMError::Transaction(
+                InvalidTransaction::OverflowPaymentInTransaction.into()
+            ))?;
+
+        // Get caller's token balance
+        let balance_slot: U256  = keccak256((caller, U256::from(3)).abi_encode()).into();
+
         let token_account = ctx
             .evm
             .inner
@@ -196,12 +262,21 @@ pub fn erc20_gas_handler_register<'a, EvmWiringT: EvmWiring, SPEC: Spec>(
             .load_account(TOKEN, &mut ctx.evm.inner.db)
             .map_err(EVMError::Database)?;
 
-        validate_tx_against_account::<EvmWiringT, SPEC>(
-            token_account.data,
-            &ctx.evm.inner.env.tx,
-            &ctx.evm.inner.env.cfg,
-        )
-        .map_err(|e| EVMError::Transaction(e.into()))?;
+        let balance = token_account
+            .storage
+            .get(&balance_slot)
+            .expect("Balance slot not found")
+            .present_value();
+
+        // Check if caller has enough tokens for both gas and value
+        if balance < total_required {
+            return Err(EVMError::Transaction(
+                InvalidTransaction::LackOfFundForMaxFee {
+                    fee: Box::new(total_required),
+                    balance: Box::new(balance),
+                }.into()
+            ));
+        }
 
         Ok(())
     });

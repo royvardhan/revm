@@ -1,5 +1,5 @@
 use alloy_provider::{network::Ethereum, ProviderBuilder, RootProvider};
-use alloy_sol_types::{abi::token, sol, SolCall, SolValue};
+use alloy_sol_types::{sol, SolCall, SolValue};
 use alloy_transport_http::Http;
 use anyhow::{anyhow, Result};
 use database::{AlloyDB, BlockId, CacheDB};
@@ -13,7 +13,7 @@ use revm::{
         result::{EVMError, ExecutionResult, InvalidTransaction, Output},
         Block, EthereumWiring, Transaction,
     },
-    Database, Evm, EvmHandler, EvmWiring,
+    Evm, EvmHandler, EvmWiring,
 };
 use std::{cmp::Ordering, sync::Arc};
 

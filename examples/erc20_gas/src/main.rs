@@ -6,14 +6,8 @@ use database::{AlloyDB, BlockId, CacheDB};
 use reqwest::{Client, Url};
 use revm::{
     context_interface::{
-        result::{EVMError, ExecutionResult, InvalidTransaction, Output},
-        JournalStateGetter,
-    },
-    database_interface::WrapDatabaseAsync,
-    handler::EthHandler,
-    primitives::{address, keccak256, Address, Bytes, TxKind, U256},
-    state::{AccountInfo, EvmStorageSlot},
-    Context, EvmCommit, EvmExec, MainEvm,
+        result::{EVMError, ExecutionResult, InvalidHeader, InvalidTransaction, Output}, JournalStateGetter, JournalStateGetterDBError, JournaledState
+    }, database_interface::WrapDatabaseAsync, handler::EthHandler, precompile::PrecompileErrors, primitives::{address, keccak256, Address, Bytes, TxKind, U256}, state::{AccountInfo, EvmStorageSlot}, Context, EvmCommit, EvmExec, MainEvm
 };
 
 mod error;
@@ -77,12 +71,19 @@ async fn main() -> Result<()> {
 }
 
 /// Helpers
-pub fn token_operation(
-    context: &mut Context,
+pub fn token_operation<CTX, ERROR>(
+    context: &mut CTX,
     sender: Address,
     recipient: Address,
     amount: U256,
-) -> Result<(), Erc20Error> {
+) -> Result<(), ERROR>
+where
+    CTX: JournalStateGetter,
+    ERROR: From<InvalidTransaction>
+    + From<InvalidHeader>
+    + From<JournalStateGetterDBError<CTX>>
+    + From<PrecompileErrors>,
+{
     let token_account = context.journal().load_account(TOKEN)?.data;
 
     let sender_balance_slot: U256 = keccak256((sender, U256::from(3)).abi_encode()).into();
@@ -93,9 +94,7 @@ pub fn token_operation(
         .present_value();
 
     if sender_balance < amount {
-        return Err(EVMError::Transaction(
-            InvalidTransaction::MaxFeePerBlobGasNotSupported,
-        ));
+        return Err(ERROR::from(InvalidTransaction::MaxFeePerBlobGasNotSupported));
     }
     // Subtract the amount from the sender's balance
     let sender_new_balance = sender_balance.saturating_sub(amount);

@@ -1,4 +1,3 @@
-use crate::error::Erc20Error;
 use crate::{token_operation, TREASURY};
 use revm::context_interface::result::{HaltReasonTrait, InvalidHeader, InvalidTransaction};
 use revm::context_interface::JournalStateGetterDBError;
@@ -14,15 +13,13 @@ use revm::{
     handler_interface::PostExecutionHandler,
     primitives::U256,
     specification::hardfork::SpecId,
-    Context,
 };
 
-
-pub struct Erc20PostExecution<CTX, ERROR, HALTREASON> {
+pub struct Erc20PostExecution<CTX, ERROR, HALTREASON = HaltReason> {
     inner: EthPostExecution<CTX, ERROR, HALTREASON>,
 }
 
-impl<CTX, ERROR, HALTREASON> Erc20PostExecution<CTX, ERROR, HALTREASON>  {
+impl<CTX, ERROR, HALTREASON> Erc20PostExecution<CTX, ERROR, HALTREASON> {
     pub fn new() -> Self {
         Self {
             inner: EthPostExecution::new(),
@@ -33,7 +30,8 @@ impl<CTX, ERROR, HALTREASON> Erc20PostExecution<CTX, ERROR, HALTREASON>  {
 impl<CTX, ERROR, HALTREASON> PostExecutionHandler for Erc20PostExecution<CTX, ERROR, HALTREASON>
 where
     CTX: EthPostExecutionContext<ERROR>,
-    ERROR: EthPostExecutionError<CTX> + From<InvalidTransaction>
+    ERROR: EthPostExecutionError<CTX>
+        + From<InvalidTransaction>
         + From<InvalidHeader>
         + From<JournalStateGetterDBError<CTX>>
         + From<PrecompileErrors>,

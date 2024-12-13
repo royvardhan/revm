@@ -1,4 +1,3 @@
-use crate::error::Erc20Error;
 use crate::keccak256;
 use crate::TOKEN;
 use alloy_sol_types::SolValue;
@@ -8,15 +7,10 @@ use revm::handler::EthValidationContext;
 use revm::handler::EthValidationError;
 use revm::{
     context::Cfg,
-    context_interface::{
-        result::{EVMError, InvalidTransaction},
-        transaction::Eip4844Tx,
-        JournalStateGetter, TransactionType,
-    },
+    context_interface::{result::InvalidTransaction, transaction::Eip4844Tx, TransactionType},
     handler::EthValidation,
     handler_interface::ValidationHandler,
     primitives::U256,
-    Context,
 };
 use std::cmp::Ordering;
 

@@ -6,15 +6,19 @@ use database::{AlloyDB, BlockId, CacheDB};
 use reqwest::{Client, Url};
 use revm::{
     context_interface::{
-        result::{EVMError, ExecutionResult, InvalidHeader, InvalidTransaction, Output}, JournalStateGetter, JournalStateGetterDBError, JournaledState
-    }, database_interface::WrapDatabaseAsync, handler::EthHandler, precompile::PrecompileErrors, primitives::{address, keccak256, Address, Bytes, TxKind, U256}, state::{AccountInfo, EvmStorageSlot}, Context, EvmCommit, EvmExec, MainEvm
+        result::{ExecutionResult, InvalidHeader, InvalidTransaction, Output},
+        JournalStateGetter, JournalStateGetterDBError, JournaledState,
+    },
+    database_interface::WrapDatabaseAsync,
+    handler::EthExecution,
+    precompile::PrecompileErrors,
+    primitives::{address, keccak256, Address, Bytes, TxKind, U256},
+    state::{AccountInfo, EvmStorageSlot},
+    Context, EvmCommit, MainEvm,
 };
 
-mod error;
 mod handlers;
-
-use error::Erc20Error;
-use handlers::{Erc20PostExecution, Erc20PreExecution, Erc20Validation};
+use handlers::{Erc20Evm, Erc20Handler, Erc20PostExecution, Erc20PreExecution, Erc20Validation};
 
 type AlloyCacheDB =
     CacheDB<WrapDatabaseAsync<AlloyDB<Http<Client>, Ethereum, RootProvider<Http<Client>>>>>;
@@ -80,9 +84,9 @@ pub fn token_operation<CTX, ERROR>(
 where
     CTX: JournalStateGetter,
     ERROR: From<InvalidTransaction>
-    + From<InvalidHeader>
-    + From<JournalStateGetterDBError<CTX>>
-    + From<PrecompileErrors>,
+        + From<InvalidHeader>
+        + From<JournalStateGetterDBError<CTX>>
+        + From<PrecompileErrors>,
 {
     let token_account = context.journal().load_account(TOKEN)?.data;
 
@@ -94,7 +98,9 @@ where
         .present_value();
 
     if sender_balance < amount {
-        return Err(ERROR::from(InvalidTransaction::MaxFeePerBlobGasNotSupported));
+        return Err(ERROR::from(
+            InvalidTransaction::MaxFeePerBlobGasNotSupported,
+        ));
     }
     // Subtract the amount from the sender's balance
     let sender_new_balance = sender_balance.saturating_sub(amount);
@@ -136,13 +142,11 @@ fn balance_of(token: Address, address: Address, alloy_db: &mut AlloyCacheDB) -> 
                 tx.data = encoded.into();
                 tx.value = U256::from(0);
             }),
-        EthHandler::default(),
+        Erc20Handler::default(),
     );
 
-    let ref_tx = evm.exec().unwrap();
-    let result = ref_tx.result;
-
-    let value = match result {
+    let ref_tx = evm.exec_commit().unwrap();
+    let value = match ref_tx {
         ExecutionResult::Success {
             output: Output::Call(value),
             ..
@@ -168,7 +172,7 @@ fn transfer(
 
     let encoded = transferCall { to, amount }.abi_encode();
 
-    let mut evm = MainEvm::new(
+    let mut evm = Erc20Evm::new(
         Context::builder()
             .with_db(cache_db)
             .modify_tx_chained(|tx| {
@@ -177,9 +181,13 @@ fn transfer(
                 tx.data = encoded.into();
                 tx.value = U256::from(0);
             }),
-        EthHandler::default(),
+        Erc20Handler::new(
+            Erc20Validation::new(),
+            Erc20PreExecution::new(),
+            EthExecution::new(),
+            Erc20PostExecution::new(),
+        ),
     );
-
     let ref_tx = evm.exec_commit().unwrap();
     let success: bool = match ref_tx {
         ExecutionResult::Success {
